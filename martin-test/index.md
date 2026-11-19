@@ -1,0 +1,124 @@
+# Testing Layers
+
+> [!WARNING]
+>
+> **Unstable**
+>
+> `martin test` is in the release binaries since 2.0.0-beta.6, but its spec file may still change.
+
+`martin test` renders real rows through the [`layers`](<https://maplibre.org/martin/sources-pg-layers/index.md>) of table sources in [bulk mode](<https://maplibre.org/martin/martin-generate/index.md>), and keeps the result in a spec file.
+
+After a change to the layers, `run` shows how the spec's cases changed. Only `generate` finds rows for paths the change added, so run it to cover them, and to update the spec.
+
+## Usage
+
+```bash
+martin test generate --config config.yaml --output roads.spec.yaml
+martin test run --config config.yaml roads.spec.yaml
+```
+
+Tests PostgreSQL table sources with `layers` and an `id_column`, from one `postgres` section, or the [`osm` sources](<https://maplibre.org/martin/sources-osm/index.md>) of a configuration without one.
+
+```yaml
+postgres:
+  connection_string: postgres://postgres@localhost:5432/db
+  tables:
+    roads:
+      schema: public
+      table: roads
+      srid: 4326
+      geometry_column: geom
+      geometry_type: LINESTRING
+      id_column: id
+      filter: "class IN ('primary', 'residential')"
+      properties:
+        id: int8
+        class: text
+        name: text
+      layers:
+        roads:
+          minzoom: "class == 'primary' ? 6 : 12"
+          attributes: [class]
+        road_labels:
+          minzoom: 12
+          where: "name != null"
+          attributes: [name]
+```
+
+### OpenStreetMap sources
+
+A case of an `osm` source is one object of its file, with the [feature id](<https://maplibre.org/martin/sources-osm/index.md#supported-features-and-handling>) as `id` and its WKT as `geometry` in its input, so a source cannot read a tag `id` or `geometry`. `generate` reads the file once per path and takes its first object on the path. A source reading ways or relations loads its node locations once per run.
+
+```yaml
+osm:
+  sources:
+    berlin:
+      path: berlin-latest.osm.pbf
+      tags: [highway, name]
+      layers:
+        roads:
+          geometry: line
+          where: "highway in ['primary', 'residential']"
+          attributes: [highway, name]
+```
+
+## Paths
+
+Paths are the distinct, interesting cases this configuration can produce.
+
+![martin test generate finds a row for 6 of 10 paths, renders 3 new cases, and writes the spec](<https://maplibre.org/martin/images/generate/test-generate.gif>)
+
+A path takes the first row found for an earlier path that is on it, else a row of its own, so a row on several paths is one case, and `generate` finds the cases of its own spec again. `NO ROW`: no row takes the path.
+
+## Spec file
+
+roads.spec.yaml
+
+```yaml
+max_zoom: 14
+cases:
+- source: roads
+  paths:
+  - "road_labels: dropped, `where` is false"
+  - "roads: class 'residential' -> minzoom 12"
+  input: # (1)!
+    class: residential
+    geometry: LINESTRING(16.34 48.22,16.341 48.221)
+    id: 3
+    name: null
+  output: # (2)!
+  - layer: roads
+    id: 3
+    geometry: line
+    zooms: 12-14
+    attributes:
+      class: residential
+```
+
+1. The row's `id_column`, the columns the layers read, and its geometry as WKT. `run` reports `ROW CHANGED` when the row no longer matches.
+2. What bulk mode writes: one entry per feature and layer, with its zooms and attributes.
+
+A layer with [per-tile operations](<https://maplibre.org/martin/sources-pg-layers/index.md#per-tile-operations>) also gets a `per_tile` list: the tiles each operation ran on, and the features it took and kept there. A changed count fails the case like a changed output.
+
+```yaml
+  per_tile:
+  - layer: shops
+    op: limit
+    tiles: 9
+    features_in: 9
+    features_out: 4  # `count: 0` leaves the layer out of the z2 tiles
+```
+
+## Running
+
+After changing `minzoom` to `"class == 'primary' ? 7 : 12"`:
+
+![martin test run fails roads 1, whose zooms changed from 6-14 to 7-14](<https://maplibre.org/martin/images/generate/test-run.gif>)
+
+`run` exits with `0` when all cases pass, `1` otherwise, and `2` on an error.
+
+## Generating
+
+In a terminal, `generate` opens a review. `--accept` writes every case instead. Without a terminal, it writes a new spec, or prints the diffs of an existing one and exits with `1`. A `--max-zoom` other than the spec's cannot keep its cases as they are, so the review only writes once each changed and gone case is accepted.
+
+![martin test generate reviews the changed case, accepts it, and writes the spec](<https://maplibre.org/martin/images/generate/test-review.gif>)
